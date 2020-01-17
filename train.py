@@ -3,22 +3,38 @@ import pyarrow.parquet as pq
 import cv2
 import numpy as np
 import keras
-from keras.layers import Dense, Input, Conv2D, MaxPool2D, Dropout, Flatten, BatchNormalization
+from keras.layers import Dense, Input, Conv2D, MaxPool2D, Dropout, Flatten, BatchNormalization, Concatenate
 from keras.optimizers import Adam
 from keras.models import Model
 
 from sklearn.model_selection import train_test_split
 
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
+
+import tensorflow as tf
+from keras.backend.tensorflow_backend import set_session
+config = tf.compat.v1.ConfigProto() 
+config.gpu_options.allow_growth = True  # dynamically grow the memory used on the GPU
+config.log_device_placement = True  # to log device placement (on which device the operation ran)
+                                    # (nothing gets printed in Jupyter, only if you run it standalone)
+sess = tf.compat.v1.Session(config=config)
+tf.compat.v1.keras.backend.set_session(sess)  # set this TensorFlow session as the default session for Keras
+
+from tensorflow.python.client import device_lib
+print(device_lib.list_local_devices())
+
 HEIGHT = 137
 WIDTH = 236
-INPUT_SIZE = 64
+INPUT_SIZE = 96
 
 LABEL_ROOT_CLASSES = 168
 LABEL_VOWEL_CLASSES = 11
 LABEL_CONSONANT_CLASSES = 7
 
 BATCH_SIZE = 90
-EPOCHS = 30
+EPOCHS = 1500
 
 print('Reading the data...')
 train_metadata = pd.read_csv('data/train.csv')
@@ -26,8 +42,7 @@ train_df = pd.read_feather('data/train_image_data_0.feather')
 # train_images = train_df.iloc[:, 1:].values.reshape([-1, HEIGHT, WIDTH])
 train_df = pd.merge(train_df, train_metadata, on = 'image_id').drop(['image_id'], axis = 1)
 
-print(train_df.head())
-
+# train_df = train_df.iloc[25000:, :]
 
 ### TODO: data cleanup, centering
 
@@ -40,71 +55,79 @@ model = MaxPool2D(pool_size=(2, 2))(model)
 model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
 model = MaxPool2D(pool_size=(3, 3))(model)
 
-# model = Conv2D(filters=128, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
-# model = BatchNormalization(momentum=0.15)(model)
-# model = MaxPool2D(pool_size=(2, 2))(model)
-# model = Dropout(rate=0.3)(model)
-# model = Conv2D(filters=128, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
-# model = MaxPool2D(pool_size=(2, 2))(model)
+model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
+model = BatchNormalization(momentum=0.15)(model)
+model = MaxPool2D(pool_size=(2, 2))(model)
+model = Dropout(rate=0.3)(model)
+model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
+model = MaxPool2D(pool_size=(2, 2))(model)
+model = Dropout(rate=0.3)(model)
 
-model = Flatten()(model)
-model = Dense(1024, activation='relu')(model)
-model = Dense(512, activation='relu')(model)
+flattened_model = Flatten()(model)
 
-last_layer = Dense(LABEL_ROOT_CLASSES, activation='softmax')(model)
-last_layer_vowel = Dense(LABEL_VOWEL_CLASSES, activation='softmax')(model)
-last_layer_consonant = Dense(LABEL_CONSONANT_CLASSES, activation='softmax')(model)
+# construct new branch for vowel, feeding the input of the root into the vowel branch
+vowel_branch = Dense(1024, activation='relu')(flattened_model)
+vowel_branch = Dropout(rate=0.3)(vowel_branch)
+vowel_branch = Dense(512, activation='relu')(vowel_branch)
+vowel_branch = Dense(LABEL_VOWEL_CLASSES, activation='softmax', name='vowel_out')(vowel_branch)
 
-model = Model(inputs = input_layer, outputs = [last_layer, last_layer_vowel, last_layer_consonant])
+consonant_branch = Dense(1024, activation='relu')(flattened_model)
+consonant_branch = Dropout(rate=0.3)(consonant_branch)
+consonant_branch = Dense(512, activation='relu')(consonant_branch)
+consonant_branch = Dense(LABEL_CONSONANT_CLASSES, activation='softmax', name='consonant_out')(consonant_branch)
+
+root_branch = Concatenate()([vowel_branch, consonant_branch, flattened_model])
+root_branch = Dense(1024, activation='relu')(root_branch)
+root_branch = Dropout(rate=0.3)(root_branch)
+root_branch = Dense(512, activation='relu')(root_branch)
+root_branch = Dense(LABEL_ROOT_CLASSES, activation='softmax', name='root_out')(root_branch)
+# one leaf node ends here
+
+
+model = Model(inputs = input_layer, outputs = [root_branch, vowel_branch, consonant_branch])
 model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 model.summary()
 
-# inputs = Input(shape = (INPUT_SIZE, INPUT_SIZE, 1))
+def center_letter(image):
+    mask = image.copy()
+    mask = mask.astype(np.uint8)
+    mask[mask >= 50] = 255
+    mask[mask < 50] = 0
 
-# model = Conv2D(filters=32, kernel_size=(3, 3), padding='SAME', activation='relu', input_shape=(INPUT_SIZE, INPUT_SIZE, 1))(inputs)
-# model = Conv2D(filters=32, kernel_size=(3, 3), padding='SAME', activation='relu')(model)
-# # model = BatchNormalization(momentum=0.15)(model)
-# model = MaxPool2D(pool_size=(2, 2))(model)
-# model = Conv2D(filters=32, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
-# model = Dropout(rate=0.3)(model)
+    contours, hierarchy = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    minX, minY, maxX, maxY = INPUT_SIZE, INPUT_SIZE, 0, 0
+    for cnt in contours:
+        x,y,w,h = cv2.boundingRect(cnt)
+        minX = min(minX, x)
+        minY = min(minY, y)
+        maxX = max(maxX, x + w)
+        maxY = max(maxY, y + h)
+    isolated = image[minY:maxY, minX:maxX].copy()
 
-# model = Conv2D(filters=64, kernel_size=(3, 3), padding='SAME', activation='relu')(model)
-# model = Conv2D(filters=64, kernel_size=(3, 3), padding='SAME', activation='relu')(model)
-# # model = BatchNormalization(momentum=0.15)(model)
-# model = MaxPool2D(pool_size=(2, 2))(model)
-# model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
-# model = BatchNormalization(momentum=0.15)(model)
-# model = Dropout(rate=0.3)(model)
-# #Added More Layers
-# model = Conv2D(filters=128, kernel_size=(3, 3), padding='SAME', activation='relu')(model)
-# model = Conv2D(filters=128, kernel_size=(3, 3), padding='SAME', activation='relu')(model)
-# model = BatchNormalization(momentum=0.15)(model)
-# model = MaxPool2D(pool_size=(2, 2))(model)
-# model = Conv2D(filters=128, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
-# model = BatchNormalization(momentum=0.15)(model)
-# model = Dropout(rate=0.3)(model)
+    max_dim = max(maxY - minY, maxX - minX)
+    centered = np.zeros((max_dim, max_dim), dtype=np.uint8)
+    cx, cy = (max_dim - isolated.shape[1])//2, (max_dim - isolated.shape[0]) // 2
+    centered[cy:(isolated.shape[0]+cy), cx:(cx+isolated.shape[1])] = isolated
+    centered = cv2.resize(centered, (INPUT_SIZE, INPUT_SIZE))
 
-# model = Flatten()(model)
-# model = Dense(512, activation = "relu")(model)
-# model = Dropout(rate=0.3)(model)
-# dense = Dense(512, activation = "relu")(model)
+    # fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(5, 3))
+    # axes[0].imshow(image,'gray')
+    # axes[1].imshow(centered,'gray', vmin=0, vmax=255)
+    # axes[2].imshow(isolated, 'gray', vmin=0, vmax=255)
+    # plt.show()
+    # plt.clf()
+    # plt.pause(0.0001)
 
-# head_root = Dense(168, activation = 'softmax')(dense)
-# # head_vowel = Dense(11, activation = 'softmax')(dense)
-# # head_consonant = Dense(7, activation = 'softmax')(dense)
-
-# model = Model(inputs=inputs, outputs=head_root)
-# model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-
+    return centered.astype(np.float32) / 255.0
 
 ## construct the training data
 
-X_train_orig = train_df.drop(['grapheme_root', 'vowel_diacritic', 'consonant_diacritic', 'grapheme'], axis = 1).values.astype(np.float32)
-X_train_orig = X_train_orig.reshape(-1, HEIGHT, WIDTH) / 255.0
+X_train_orig = train_df.drop(['grapheme_root', 'vowel_diacritic', 'consonant_diacritic', 'grapheme'], axis = 1).values.astype(np.uint8)
+X_train_orig = X_train_orig.reshape(-1, HEIGHT, WIDTH)
 # resize
 X_train = []
 for image in X_train_orig:
-    image_resized = cv2.resize(image, (INPUT_SIZE, INPUT_SIZE))
+    image_resized = center_letter(255 - image)
     X_train.append(image_resized)
 
 X_train = np.reshape(X_train, (-1, INPUT_SIZE, INPUT_SIZE, 1))
@@ -129,10 +152,10 @@ print(Y_train_vowel.shape)
 print(Y_train_consonant.shape)
 
 x_train, x_test, y_train_root, y_test_root, y_train_vowel, y_test_vowel, y_train_consonant, y_test_consonant = \
-    train_test_split(X_train, Y_train_root, Y_train_vowel, Y_train_consonant, test_size=0.1, random_state=666)
+    train_test_split(X_train, Y_train_root, Y_train_vowel, Y_train_consonant, test_size=0.15, random_state=42)
 
-history = model.fit(x_train, { 'dense_3' : y_train_root, 'dense_4': y_train_vowel, 'dense_5': y_train_consonant }, \
-    batch_size=BATCH_SIZE, epochs=EPOCHS, shuffle=True, validation_data=(x_test, { 'dense_3' : y_test_root, 'dense_4': y_test_vowel, 'dense_5': y_test_consonant }))
+history = model.fit(x_train, { 'root_out' : y_train_root, 'vowel_out': y_train_vowel, 'consonant_out': y_train_consonant }, \
+    batch_size=BATCH_SIZE, epochs=EPOCHS, shuffle=True, validation_data=(x_test, { 'root_out' : y_test_root, 'vowel_out': y_test_vowel, 'consonant_out': y_test_consonant }))
 
 print(history)
 
