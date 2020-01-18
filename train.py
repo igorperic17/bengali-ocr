@@ -6,6 +6,7 @@ import keras
 from keras.layers import Dense, Input, Conv2D, MaxPool2D, Dropout, Flatten, BatchNormalization, Concatenate
 from keras.optimizers import Adam
 from keras.models import Model
+from keras.callbacks import ModelCheckpoint
 
 from sklearn.model_selection import train_test_split
 
@@ -27,27 +28,20 @@ print(device_lib.list_local_devices())
 
 HEIGHT = 137
 WIDTH = 236
-INPUT_SIZE = 96
+INPUT_SIZE = 128
 
 LABEL_ROOT_CLASSES = 168
 LABEL_VOWEL_CLASSES = 11
 LABEL_CONSONANT_CLASSES = 7
 
 BATCH_SIZE = 90
-EPOCHS = 1500
-
-print('Reading the data...')
-train_metadata = pd.read_csv('data/train.csv')
-train_df = pd.read_feather('data/train_image_data_0.feather')
-# train_images = train_df.iloc[:, 1:].values.reshape([-1, HEIGHT, WIDTH])
-train_df = pd.merge(train_df, train_metadata, on = 'image_id').drop(['image_id'], axis = 1)
-
-# train_df = train_df.iloc[25000:, :]
-
-### TODO: data cleanup, centering
+EPOCHS = 10
 
 # build network
 input_layer = Input(shape=(INPUT_SIZE, INPUT_SIZE, 1))
+model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu', input_shape=(INPUT_SIZE, INPUT_SIZE, 1))(input_layer)
+model = BatchNormalization(momentum=0.15)(model)
+model = MaxPool2D(pool_size=(2, 2))(model)
 model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu', input_shape=(INPUT_SIZE, INPUT_SIZE, 1))(input_layer)
 model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
 model = BatchNormalization(momentum=0.15)(model)
@@ -76,16 +70,17 @@ consonant_branch = Dropout(rate=0.3)(consonant_branch)
 consonant_branch = Dense(512, activation='relu')(consonant_branch)
 consonant_branch = Dense(LABEL_CONSONANT_CLASSES, activation='softmax', name='consonant_out')(consonant_branch)
 
-root_branch = Concatenate()([vowel_branch, consonant_branch, flattened_model])
-root_branch = Dense(1024, activation='relu')(root_branch)
+root_branch = Dense(1024, activation='relu')(flattened_model)
 root_branch = Dropout(rate=0.3)(root_branch)
 root_branch = Dense(512, activation='relu')(root_branch)
 root_branch = Dense(LABEL_ROOT_CLASSES, activation='softmax', name='root_out')(root_branch)
 # one leaf node ends here
 
-
 model = Model(inputs = input_layer, outputs = [root_branch, vowel_branch, consonant_branch])
-model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+lossWeights = {"root_out": 1.0, "consonant_out": 0.3, "vowel_out": 0.3}
+INIT_LR = 1e-3
+opt = Adam(lr=INIT_LR, decay=INIT_LR / EPOCHS)
+model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'], loss_weights=lossWeights)
 model.summary()
 
 def center_letter(image):
@@ -118,48 +113,82 @@ def center_letter(image):
     # plt.clf()
     # plt.pause(0.0001)
 
-    return centered.astype(np.float32) / 255.0
+    # normalize the image
+    centered = centered.astype(np.float32) / 255.0
+    # centered /= centered.max()
+
+    return centered
 
 ## construct the training data
 
-X_train_orig = train_df.drop(['grapheme_root', 'vowel_diacritic', 'consonant_diacritic', 'grapheme'], axis = 1).values.astype(np.uint8)
-X_train_orig = X_train_orig.reshape(-1, HEIGHT, WIDTH)
-# resize
-X_train = []
-for image in X_train_orig:
-    image_resized = center_letter(255 - image)
-    X_train.append(image_resized)
+train_metadata = pd.read_csv('data/train.csv')
+for i in range(100):
+    feather_file_idx = i % 4
+    print('Iteration {0}'.format(i))
+    print('Reading the data from batch {0}'.format(feather_file_idx))
+    train_df = pd.read_feather('data/train_image_data_{0}.feather'.format(feather_file_idx))
+    # train_images = train_df.iloc[:, 1:].values.reshape([-1, HEIGHT, WIDTH])
+    train_df = pd.merge(train_df, train_metadata, on = 'image_id').drop(['image_id'], axis = 1)
 
-X_train = np.reshape(X_train, (-1, INPUT_SIZE, INPUT_SIZE, 1))
+    X_train_orig = train_df.drop(['grapheme_root', 'vowel_diacritic', 'consonant_diacritic', 'grapheme'], axis = 1).values.astype(np.uint8)
+    X_train_orig = X_train_orig.reshape(-1, HEIGHT, WIDTH)
+    # resize
+    X_train = []
+    for image in X_train_orig:
+        image_resized = center_letter(255 - image)
+        X_train.append(image_resized)
 
-def one_hot(target_label, num_of_classes):
-    Y_train_orig = train_df[target_label].values
-    Y_train = []
-    for label in Y_train_orig:
-        label_resized = np.zeros((num_of_classes), dtype=np.float32)
-        label_resized[label] = 1
-        Y_train.append(label_resized)
-    Y_train = np.reshape(Y_train, (-1, num_of_classes))
-    return Y_train
+    X_train = np.reshape(X_train, (-1, INPUT_SIZE, INPUT_SIZE, 1))
 
-Y_train_root = one_hot('grapheme_root', LABEL_ROOT_CLASSES)
-Y_train_vowel = one_hot('vowel_diacritic', LABEL_VOWEL_CLASSES)
-Y_train_consonant = one_hot('consonant_diacritic', LABEL_CONSONANT_CLASSES)
+    def one_hot(target_label, num_of_classes):
+        Y_train_orig = train_df[target_label].values
+        Y_train = []
+        for label in Y_train_orig:
+            label_resized = np.zeros((num_of_classes), dtype=np.float32)
+            label_resized[label] = 1
+            Y_train.append(label_resized)
+        Y_train = np.reshape(Y_train, (-1, num_of_classes))
+        return Y_train
 
+    Y_train_root = one_hot('grapheme_root', LABEL_ROOT_CLASSES)
+    Y_train_vowel = one_hot('vowel_diacritic', LABEL_VOWEL_CLASSES)
+    Y_train_consonant = one_hot('consonant_diacritic', LABEL_CONSONANT_CLASSES)
 
-print(Y_train_root.shape)
-print(Y_train_vowel.shape)
-print(Y_train_consonant.shape)
+    print(Y_train_root.shape)
+    print(Y_train_vowel.shape)
+    print(Y_train_consonant.shape)
 
-x_train, x_test, y_train_root, y_test_root, y_train_vowel, y_test_vowel, y_train_consonant, y_test_consonant = \
-    train_test_split(X_train, Y_train_root, Y_train_vowel, Y_train_consonant, test_size=0.15, random_state=42)
-
-history = model.fit(x_train, { 'root_out' : y_train_root, 'vowel_out': y_train_vowel, 'consonant_out': y_train_consonant }, \
-    batch_size=BATCH_SIZE, epochs=EPOCHS, shuffle=True, validation_data=(x_test, { 'root_out' : y_test_root, 'vowel_out': y_test_vowel, 'consonant_out': y_test_consonant }))
-
-print(history)
+    x_train, x_test, y_train_root, y_test_root, y_train_vowel, y_test_vowel, y_train_consonant, y_test_consonant = \
+        train_test_split(X_train, Y_train_root, Y_train_vowel, Y_train_consonant, test_size=0.15)
+        # train_test_split(X_train, Y_train_root, Y_train_vowel, Y_train_consonant, test_size=0.15, random_state=42)
 
 
+    # from keras.callbacks import ModelCheckpoint
+    # checkpoint = ModelCheckpoint(filepath='best_model.h5',save_best_only=True, monitor='val_aucroc', mode='max', period=5, verbose=1) 
+    # checkpoint
+    filepath="model/weights-improvement-{epoch:02d}-{val_root_out_accuracy:.2f}.hdf5"
+    checkpoint = ModelCheckpoint(filepath, monitor='val_root_out_accuracy', verbose=1, save_best_only=False, mode='max')
+    callbacks_list = [checkpoint]
+
+    history = model.fit(x_train, { 'root_out' : y_train_root, 'vowel_out': y_train_vowel, 'consonant_out': y_train_consonant }, \
+        callbacks=callbacks_list, batch_size=BATCH_SIZE, epochs=EPOCHS, shuffle=True, validation_data=(x_test, { 'root_out' : y_test_root, 'vowel_out': y_test_vowel, 'consonant_out': y_test_consonant }))
+
+    print(history)
+
+    del train_df
+    del x_train
+    del x_test
+    del y_train_root
+    del y_test_root
+    del y_train_vowel
+    del y_test_vowel
+    del y_train_consonant
+    del y_test_consonant
+    del X_train_orig
+    del X_train
+    del Y_train_root
+    del Y_train_vowel
+    del Y_train_consonant
 
 
 
