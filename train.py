@@ -3,16 +3,19 @@ import pyarrow.parquet as pq
 import cv2
 import numpy as np
 import keras
-from keras.layers import Dense, Input, Conv2D, MaxPool2D, Dropout, Flatten, BatchNormalization, Concatenate
+from keras.layers import Dense, Input, Conv2D, MaxPool2D, Dropout, Flatten, BatchNormalization, Concatenate, GlobalAveragePooling2D
 from keras.optimizers import Adam
 from keras.models import Model
 from keras.callbacks import ModelCheckpoint
+from keras import applications
 
 from sklearn.model_selection import train_test_split
 
 import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
+
+from sprinkles import sprinkles
 
 import tensorflow as tf
 from keras.backend.tensorflow_backend import set_session
@@ -34,53 +37,51 @@ LABEL_ROOT_CLASSES = 168
 LABEL_VOWEL_CLASSES = 11
 LABEL_CONSONANT_CLASSES = 7
 
-BATCH_SIZE = 90
-EPOCHS = 10
+BATCH_SIZE = 100
+EPOCHS = 3
 
 # build network
 input_layer = Input(shape=(INPUT_SIZE, INPUT_SIZE, 1))
-model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu', input_shape=(INPUT_SIZE, INPUT_SIZE, 1))(input_layer)
-model = BatchNormalization(momentum=0.15)(model)
-model = MaxPool2D(pool_size=(2, 2))(model)
-model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu', input_shape=(INPUT_SIZE, INPUT_SIZE, 1))(input_layer)
-model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
-model = BatchNormalization(momentum=0.15)(model)
-model = MaxPool2D(pool_size=(2, 2))(model)
-model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
-model = MaxPool2D(pool_size=(3, 3))(model)
+# model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu', input_shape=(INPUT_SIZE, INPUT_SIZE, 1))(input_layer)
+# model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
+# model = BatchNormalization(momentum=0.15)(model)
+# model = MaxPool2D(pool_size=(2, 2))(model)
+# model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
+# model = MaxPool2D(pool_size=(3, 3))(model)
 
-model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
-model = BatchNormalization(momentum=0.15)(model)
-model = MaxPool2D(pool_size=(2, 2))(model)
-model = Dropout(rate=0.3)(model)
-model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
-model = MaxPool2D(pool_size=(2, 2))(model)
-model = Dropout(rate=0.3)(model)
+# model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
+# model = BatchNormalization(momentum=0.15)(model)
+# model = MaxPool2D(pool_size=(2, 2))(model)
+# model = Dropout(rate=0.3)(model)
+# model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
+# model = MaxPool2D(pool_size=(2, 2))(model)
+# model = Dropout(rate=0.3)(model)
 
-flattened_model = Flatten()(model)
+# flattened_model = Flatten()(model)
+# flattened_model = Dense(1024, activation='relu')(flattened_model)
+# flattened_model = Dropout(rate=0.3)(flattened_model)
+# flattened_model = Dense(512, activation='relu')(flattened_model)
 
-# construct new branch for vowel, feeding the input of the root into the vowel branch
-vowel_branch = Dense(1024, activation='relu')(flattened_model)
-vowel_branch = Dropout(rate=0.3)(vowel_branch)
-vowel_branch = Dense(512, activation='relu')(vowel_branch)
-vowel_branch = Dense(LABEL_VOWEL_CLASSES, activation='softmax', name='vowel_out')(vowel_branch)
+# # construct new branch for vowel, feeding the input of the root into the vowel branch
 
-consonant_branch = Dense(1024, activation='relu')(flattened_model)
-consonant_branch = Dropout(rate=0.3)(consonant_branch)
-consonant_branch = Dense(512, activation='relu')(consonant_branch)
-consonant_branch = Dense(LABEL_CONSONANT_CLASSES, activation='softmax', name='consonant_out')(consonant_branch)
+# vowel_branch = Dense(LABEL_VOWEL_CLASSES, activation='softmax', name='vowel_out')(flattened_model)
+# consonant_branch = Dense(LABEL_CONSONANT_CLASSES, activation='softmax', name='consonant_out')(flattened_model)
+# root_branch = Dense(LABEL_ROOT_CLASSES, activation='softmax', name='root_out')(flattened_model)
+# # one leaf node ends here
 
-root_branch = Dense(1024, activation='relu')(flattened_model)
-root_branch = Dropout(rate=0.3)(root_branch)
-root_branch = Dense(512, activation='relu')(root_branch)
-root_branch = Dense(LABEL_ROOT_CLASSES, activation='softmax', name='root_out')(root_branch)
-# one leaf node ends here
 
-model = Model(inputs = input_layer, outputs = [root_branch, vowel_branch, consonant_branch])
-lossWeights = {"root_out": 1.0, "consonant_out": 0.3, "vowel_out": 0.3}
-INIT_LR = 1e-3
-opt = Adam(lr=INIT_LR, decay=INIT_LR / EPOCHS)
-model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'], loss_weights=lossWeights)
+base_model = applications.resnet50.ResNet50(weights= None, include_top=False, input_shape= (INPUT_SIZE,INPUT_SIZE,1))
+
+x = base_model.output
+x = GlobalAveragePooling2D()(x)
+x = Dropout(0.7)(x)
+vowel_branch = Dense(LABEL_VOWEL_CLASSES, activation='softmax', name='vowel_out')(x)
+consonant_branch = Dense(LABEL_CONSONANT_CLASSES, activation='softmax', name='consonant_out')(x)
+root_branch = Dense(LABEL_ROOT_CLASSES, activation='softmax', name='root_out')(x)
+
+model = Model(inputs = base_model.input, outputs = [root_branch, vowel_branch, consonant_branch])
+lossWeights = {"root_out": 1.0, "consonant_out": 0.5, "vowel_out": 0.5}
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'], loss_weights=lossWeights)
 model.summary()
 
 def center_letter(image):
@@ -115,7 +116,7 @@ def center_letter(image):
 
     # normalize the image
     centered = centered.astype(np.float32) / 255.0
-    # centered /= centered.max()
+    centered /= centered.max()
 
     return centered
 
